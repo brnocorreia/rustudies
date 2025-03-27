@@ -1,7 +1,8 @@
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
-    sync::broadcast,
+    sync::{broadcast, Mutex},
 };
 
 #[tokio::main]
@@ -12,15 +13,18 @@ async fn main() {
     // We create a broadcast channel to send messages to all clients connected to the server
     let (tx, _rx) = broadcast::channel(10);
 
+    // We create a mutex to store the users connected to the server
+    let users = Arc::new(Mutex::new(HashMap::<SocketAddr, String>::new()));
+
+    let reserved_nicknames = ["admin", "server", "system"];
+
     loop {
         // We accept a connection from a client
         let (mut socket, addr) = listener.accept().await.unwrap();
-
         let tx = tx.clone();
         let mut rx = tx.subscribe();
+        let users = Arc::clone(&users);
 
-        // We are spawning a new task to handle the client's connection
-        // In this way, we can handle multiple clients concurrently without I/O blocking
         tokio::spawn(async move {
             // We split the socket into a reader and writer, its useful to use the buffer reader
             let (reader, mut writer) = socket.split();
@@ -29,17 +33,90 @@ async fn main() {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
 
+            let mut nickname = String::new();
+            let mut is_valid_nickname = false;
+
+            while !is_valid_nickname {
+                writer
+                    .write_all(b"Please enter your nickname: ")
+                    .await
+                    .unwrap();
+
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    return;
+                }
+
+                nickname = line.trim().to_string();
+                line.clear();
+
+                let nickname_lower = nickname.to_lowercase();
+
+                if reserved_nicknames
+                    .iter()
+                    .any(|&n| n.to_lowercase() == nickname_lower)
+                {
+                    writer.write_all(b"This nickname is reserved for the server! Please choose another one.\n").await.unwrap();
+                    continue;
+                }
+
+                // Check if nickname is already in use
+                let nickname_in_use = {
+                    let users_lock = users.lock().await;
+                    users_lock
+                        .values()
+                        .any(|n| n.to_lowercase() == nickname_lower)
+                };
+
+                if nickname_in_use {
+                    writer
+                        .write_all(b"This nickname is already in use! Please choose another one.\n")
+                        .await
+                        .unwrap();
+                    continue;
+                }
+
+                // Nickname is valid
+                is_valid_nickname = true;
+            }
+
+            {
+                let mut users_lock = users.lock().await;
+                users_lock.insert(addr, nickname.clone());
+            }
+
+            let connect_msg = format!(
+                "[SERVER]: A new user [{}] connected! Be welcome!\n",
+                nickname
+            );
+            tx.send((connect_msg, addr)).unwrap();
+
             // We loop until the client disconnects
             loop {
                 tokio::select! {
                     result = reader.read_line(&mut line) => {
                         // If the client disconnects (0 bytes read), we break the loop
                         if result.unwrap() == 0 {
+                            let nickname = {
+                                let users_lock = users.lock().await;
+                                users_lock.get(&addr).cloned().unwrap_or_else(|| addr.to_string())
+                            };
+
+                            let disconnect_msg = format!("[SERVER]: The user [{}] disconnected!\n", nickname);
+                            tx.send((disconnect_msg, addr)).unwrap();
+
+                            let mut users_lock = users.lock().await;
+                            users_lock.remove(&addr);
                             break;
                         }
 
+                        let nickname = {
+                            let users_lock = users.lock().await;
+                            users_lock.get(&addr).cloned().unwrap_or_else(|| addr.to_string())
+                        };
+
+                        let message = format!("[{}]: {}", nickname, line);
                         // We send the client's message to all clients connected to the server
-                        tx.send((line.clone(), addr)).unwrap();
+                        tx.send((message, addr)).unwrap();
                         // Then we clear the line string to read the next message
                         line.clear();
                     }
