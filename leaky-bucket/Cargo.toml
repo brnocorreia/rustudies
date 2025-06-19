@@ -1,0 +1,13 @@
+[package]
+name = "leaky-bucket-woovi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.4"
+chrono = { version = "0.4.41", features = ["serde"] }
+redis = { version = "0.31.0", features = ["json"] }
+redis-macros = "0.5.4"
+serde = "1.0.219"
+serde_json = "1.0.140"
+tokio = { version = "1.45.1", features = ["rt-multi-thread"] }
